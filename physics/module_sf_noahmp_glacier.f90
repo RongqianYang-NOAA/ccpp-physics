@@ -117,7 +117,8 @@ contains
                    iloc    ,jloc    ,cosz    ,nsnow   ,nsoil   ,dt      , & ! in : time/space/model-related
                    sfctmp  ,sfcprs  ,uu      ,vv      ,q2      ,soldn   , & ! in : forcing
                    prcp    ,lwdn    ,tbot    ,zlvl    ,ficeold ,zsoil   , & ! in : forcing
-                   qsnow   ,sneqvo  ,albold  ,cm      ,ch      ,isnow   , & ! in/out : 
+                   qsnow   ,sneqvo  ,albold  ,ustarx  ,z0h_total        , &
+                   cm      ,ch      ,isnow   ,                            & ! in/out : 
                    sneqv   ,smc     ,zsnso   ,snowh   ,snice   ,snliq   , & ! in/out :
                    tg      ,stc     ,sh2o    ,tauss   ,qsfc    ,          & ! in/out : 
                    fsa     ,fsr     ,fira    ,fsh     ,fgev    ,ssoil   , & ! out : 
@@ -162,6 +163,10 @@ contains
   real (kind=kind_phys)                           , intent(inout) :: qsnow  !< snowfall [mm/s]
   real (kind=kind_phys)                           , intent(inout) :: sneqvo !< snow mass at last time step (mm)
   real (kind=kind_phys)                           , intent(inout) :: albold !< snow albedo at last time step (class type)
+
+  real (kind=kind_phys)                           , intent(inout) :: ustarx    !< friction velocity
+  real (kind=kind_phys)                           , intent(out)   :: z0h_total !< roughness length for heat
+
   real (kind=kind_phys)                           , intent(inout) :: cm     !< momentum drag coefficient
   real (kind=kind_phys)                           , intent(inout) :: ch     !< sensible heat exchange coefficient
 
@@ -255,21 +260,21 @@ contains
 
 ! compute energy budget (momentum & energy fluxes and phase changes) 
 
-    call energy_glacier (nsnow  ,nsoil  ,isnow  ,dt     ,qsnow  ,rhoair , & !in
-                         eair   ,sfcprs ,qair   ,sfctmp ,lwdn   ,uu     , & !in
-                         vv     ,solad  ,solai  ,cosz   ,zlvl   ,         & !in
-                         tbot   ,zbot   ,zsnso  ,dzsnso ,                 & !in
-                         tg     ,stc    ,snowh  ,sneqv  ,sneqvo ,sh2o   , & !inout
-                         smc    ,snice  ,snliq  ,albold ,cm     ,ch     , & !inout
+    call energy_glacier (nsnow ,nsoil  ,isnow  ,dt     ,qsnow  ,rhoair , & !in
+                         eair  ,sfcprs ,qair   ,sfctmp ,lwdn   ,uu     , & !in
+                         vv    ,solad  ,solai  ,cosz   ,zlvl   ,         & !in
+                         tbot  ,zbot   ,zsnso  ,dzsnso ,ustarx ,z0h_total,& !in
+                         tg    ,stc    ,snowh  ,sneqv  ,sneqvo ,sh2o   , & !inout
+                         smc   ,snice  ,snliq  ,albold ,cm     ,ch     , & !inout
 #ifdef CCPP
-                         tauss  ,qsfc   ,errmsg ,errflg ,                 & !inout
+                         tauss ,qsfc   ,errmsg ,errflg ,                 & !inout
 #else
-                         tauss  ,qsfc   ,                                 & !inout
+                         tauss ,qsfc   ,                                 & !inout
 #endif
-                         imelt  ,snicev ,snliqv ,epore  ,qmelt  ,ponding, & !out
-                         sag    ,fsa    ,fsr    ,fira   ,fsh    ,fgev   , & !out
-                         trad   ,t2m    ,ssoil  ,lathea ,q2e    ,emissi,  & !out
-                         ch2b   ,albsnd ,albsni                         )   !out
+                         imelt ,snicev ,snliqv ,epore  ,qmelt  ,ponding, & !out
+                         sag   ,fsa    ,fsr    ,fira   ,fsh    ,fgev   , & !out
+                         trad  ,t2m    ,ssoil  ,lathea ,q2e    ,emissi,  & !out
+                         ch2b  ,albsnd ,albsni                         )   !out
 
 #ifdef CCPP
     if (errflg /= 0) return
@@ -388,7 +393,7 @@ contains
   subroutine energy_glacier (nsnow  ,nsoil  ,isnow  ,dt     ,qsnow  ,rhoair , & !in
                              eair   ,sfcprs ,qair   ,sfctmp ,lwdn   ,uu     , & !in
                              vv     ,solad  ,solai  ,cosz   ,zref   ,         & !in
-                             tbot   ,zbot   ,zsnso  ,dzsnso ,                 & !in
+                             tbot   ,zbot   ,zsnso  ,dzsnso ,ustarx ,z0h_total, & !in
                              tg     ,stc    ,snowh  ,sneqv  ,sneqvo ,sh2o   , & !inout
                              smc    ,snice  ,snliq  ,albold ,cm     ,ch     , & !inout
 #ifdef CCPP
@@ -444,8 +449,13 @@ contains
   real (kind=kind_phys)                              , intent(inout) :: albold !< snow albedo at last time step(class type)
   real (kind=kind_phys)                              , intent(inout) :: cm     !< momentum drag coefficient
   real (kind=kind_phys)                              , intent(inout) :: ch     !< sensible heat exchange coefficient
+
+  real (kind=kind_phys)                              , intent(inout) :: ustarx !< friction velocity
+  real (kind=kind_phys)                              , intent(out)   :: z0h_total !< roughness length for heat
+
   real (kind=kind_phys)                              , intent(inout) :: tauss  !< snow aging factor
   real (kind=kind_phys)                              , intent(inout) :: qsfc   !< mixing ratio at lowest model layer
+
   
 #ifdef CCPP  
   character(len=*)                  , intent(inout) :: errmsg
@@ -537,6 +547,7 @@ contains
                        zlvl    ,zpd     ,qair    ,sfctmp  ,rhoair  ,sfcprs  , & !in
                        ur      ,gamma   ,rsurf   ,lwdn    ,rhsur   ,smc     , & !in
                        eair    ,stc     ,sag     ,snowh   ,lathea  ,sh2o    , & !in
+                       ustarx  ,z0h_total                                   , &
 #ifdef CCPP
                        cm      ,ch      ,tg      ,qsfc    ,errmsg  ,errflg  , & !inout
 #else
@@ -972,6 +983,7 @@ contains
                            zlvl    ,zpd     ,qair    ,sfctmp  ,rhoair  ,sfcprs  , & !in
                            ur      ,gamma   ,rsurf   ,lwdn    ,rhsur   ,smc     , & !in
                            eair    ,stc     ,sag     ,snowh   ,lathea  ,sh2o    , & !in
+                           ustarx  ,z0h_total                                   , & 
 #ifdef CCPP
                            cm      ,ch      ,tgb     ,qsfc    ,errmsg  ,errflg  , & !inout
 #else
@@ -1021,6 +1033,10 @@ contains
 ! input/output
   real (kind=kind_phys),                         intent(inout) :: cm     !< momentum drag coefficient
   real (kind=kind_phys),                         intent(inout) :: ch     !< sensible heat exchange coefficient
+
+  real (kind=kind_phys),                         intent(inout) :: ustarx !< friction velocity
+  real (kind=kind_phys),                         intent(out)   :: z0h_total !< roughness length for heat
+
   real (kind=kind_phys),                         intent(inout) :: tgb    !< ground temperature (k)
   real (kind=kind_phys),                         intent(inout) :: qsfc   !< mixing ratio at lowest model layer
   
@@ -1040,8 +1056,10 @@ contains
   real (kind=kind_phys),                           intent(out) :: ehb2   !< sensible heat conductance for diagnostics
 
 
+
 ! local variables 
   integer :: niterb                   !< number of iterations for surface temperature
+
   real (kind=kind_phys)    :: mpe     !< prevents overflow error if division by zero
   real (kind=kind_phys)    :: dtg     !< change in tg, last iteration (k)
   integer                  :: mozsgn  !< number of times moz changes sign
@@ -1056,8 +1074,12 @@ contains
   real (kind=kind_phys)    :: csh     !< coefficients for sh as function of ts
   real (kind=kind_phys)    :: cev     !< coefficients for ev as function of esat[ts]
   real (kind=kind_phys)    :: cq2b    !<
+
   integer                  :: iter    !< iteration index
   real (kind=kind_phys)    :: z0h     !< roughness length, sensible heat, ground (m)
+
+  real (kind=kind_phys)    :: reyni   !< Roughness Reynolds # over ice
+
   real (kind=kind_phys)    :: moz     !< monin-obukhov stability parameter
   real (kind=kind_phys)    :: fm      !< momentum stability correction, weighted by prior iters
   real (kind=kind_phys)    :: fh      !< sen heat stability correction, weighted by prior iters
@@ -1088,7 +1110,18 @@ contains
         moz    = 0.
 
         h      = 0.
-        fv     = 0.1
+
+        fv     = ustarx
+
+        reyni  = fv*z0m/(1.5e-05)                         !introduction of fv dependent z0h for the iter
+
+         if (reyni .gt. 2.0) then
+            z0h = z0m/exp(2.46*(reyni)**0.25 - log(7.4))  !Brutsaert 1982
+         else
+            z0h = z0m/exp(-log(0.397))                    !Brusaert 1982, table 4
+         endif
+
+        z0h_total = z0h
 
         cir = emg*sb
         cgh = 2.*df(isnow+1)/dzsnso(isnow+1)
@@ -1096,7 +1129,7 @@ contains
 ! -----------------------------------------------------------------
       loop3: do iter = 1, niterb  ! begin stability iteration
 
-        z0h = z0m 
+!       z0h = z0m 
 
 !       for now, only allow sfcdif1 until others can be fixed
 
@@ -1108,6 +1141,7 @@ contains
        &             moz ,mozsgn ,fm ,fh ,fm2 ,fh2                  , & !inout
 #endif
        &             fv     ,cm     ,ch     ,ch2)                       !out
+
 
 #ifdef CCPP
         if (errflg /= 0) return

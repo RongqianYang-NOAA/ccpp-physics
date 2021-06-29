@@ -88,8 +88,8 @@
 !!  @{
 !!    - Initialize CCPP error handling variables.
 !!    - Set a flag to only continue with each grid cell if the fraction of land is non-zero.
-!!    - This driver may be called as part of an iterative loop. If called as the first "guess" run, 
-!!        save land-related prognostic fields to restore.
+!!    - This driver may be called as part of an iterative loop.No guess run necessary as the 
+!!    - iteration is done internally in the code. 
 !!    - Initialize output variables to zero and prepare variables for input into the NoahMP LSM.
 !!    - Call transfer_mp_parameters() to fill a derived datatype for input into the NoahMP LSM.
 !!    - Call noahmp_options() to set module-level scheme options for the NoahMP LSM.
@@ -97,9 +97,8 @@
 !!        module-level scheme options for NoahMP Glacier and call noahmp_glacier().
 !!    - For other vegetation types, call noahmp_sflx(), the entry point of the NoahMP LSM.
 !!    - Set output variables from the output of noahmp_glacier() and/or noahmp_sflx().
-!!    - Call penman() to calculate potential evaporation.
+!!    - Call penman() to calculate potential evaporation to meet the output requirement.
 !!    - Calculate the surface specific humidity and convert surface sensible and latent heat fluxes in W m-2 from their kinematic values.
-!!    - If a "guess" run, restore the land-related prognostic fields.
 !                                                                       !
 !-----------------------------------
   subroutine noahmpdrv_run                                       &
@@ -107,18 +106,19 @@
 !  ---  inputs:
     ( im, km, lsnowl, itime, ps, u1, v1, t1, q1, soiltyp,        &
       vegtype, sigmaf, dlwflx, dswsfc, snet, delt, tg3, cm, ch,  &
-      prsl1, prslki, zf, dry, wind, slopetyp,                    &
+      prsl1, prslk1, prslki, prsik1, zf, dry, wind, slopetyp,    &
       shdmin, shdmax, snoalb, sfalb, flag_iter,                  &
       idveg, iopt_crs, iopt_btr, iopt_run, iopt_sfc, iopt_frz,   &
       iopt_inf, iopt_rad, iopt_alb, iopt_snf, iopt_tbot,         &
       iopt_stc, xlatin, xcoszin, iyrlen, julian,                 &
       rainn_mp, rainc_mp, snow_mp, graupel_mp, ice_mp,           &
       con_hvap, con_cp, con_jcal, rhoh2o, con_eps, con_epsm1,    &
-      con_fvirt, con_rd, con_hfus,                               &
+      con_fvirt, con_rd, con_hfus,thsfc_loc,                     &
 
 !  ---  in/outs:
       weasd, snwdph, tskin, tprcp, srflag, smc, stc, slc,        &
       canopy, trans, zorl,                                       &
+      rb1,fm1,fh1,ustar1,stress1,fm101,fh21,                     &
 
 ! --- Noah MP specific
 
@@ -137,6 +137,7 @@
   use machine ,   only : kind_phys
   use funcphys,   only : fpvs
 
+  use sfc_diff,   only : stability
   use module_sf_noahmplsm
   use module_sf_noahmp_glacier
   use noahmp_tables, only : isice_table, co2_table, o2_table,       &
@@ -150,6 +151,7 @@
   real(kind=kind_phys), parameter :: a3      = 273.16
   real(kind=kind_phys), parameter :: a4      = 35.86
   real(kind=kind_phys), parameter :: a23m4   = a2*(a3-a4)
+  real(kind=kind_phys), parameter :: gravity = 9.81
       
   real, parameter                 :: undefined  =  9.99e20_kind_phys
 
@@ -180,10 +182,14 @@
   real(kind=kind_phys), dimension(:)     , intent(in)    :: snet       ! total sky sfc netsw flx into ground[W/m2]
   real(kind=kind_phys)                   , intent(in)    :: delt       ! time interval [s]
   real(kind=kind_phys), dimension(:)     , intent(in)    :: tg3        ! deep soil temperature [K]
-  real(kind=kind_phys), dimension(:)     , intent(in)    :: cm         ! surface exchange coeff for momentum [-]
-  real(kind=kind_phys), dimension(:)     , intent(in)    :: ch         ! surface exchange coeff heat & moisture[-]
+  real(kind=kind_phys), dimension(:)     , intent(inout) :: cm         ! surface exchange coeff for momentum [-]
+  real(kind=kind_phys), dimension(:)     , intent(inout) :: ch         ! surface exchange coeff heat & moisture[-]
   real(kind=kind_phys), dimension(:)     , intent(in)    :: prsl1      ! sfc layer 1 mean pressure [Pa]
-  real(kind=kind_phys), dimension(:)     , intent(in)    :: prslki     ! to calculate potential temperature
+  real(kind=kind_phys), dimension(:)     , intent(in)    :: prslk1     ! exner_function_at lowest model layer
+
+  real(kind=kind_phys), dimension(:)     , intent(in)    :: prslki     ! Exner function bt midlayer and interface at 1st layer
+  real(kind=kind_phys), dimension(:)     , intent(in)    :: prsik1     ! Exner function at the ground surfac
+
   real(kind=kind_phys), dimension(:)     , intent(in)    :: zf         ! height of bottom layer [m]
   logical             , dimension(:)     , intent(in)    :: dry        ! = T if a point with any land
   real(kind=kind_phys), dimension(:)     , intent(in)    :: wind       ! wind speed [m/s]
@@ -223,6 +229,9 @@
   real(kind=kind_phys)                   , intent(in)    :: con_fvirt  ! Rv/Rd - 1
   real(kind=kind_phys)                   , intent(in)    :: con_rd     ! gas constant air [J/kg/K]
   real(kind=kind_phys)                   , intent(in)    :: con_hfus   ! lat heat H2O fusion  [J/kg]
+
+  logical                                , intent(in)    :: thsfc_loc ! Flag for reference pressure in theta calculation
+
   real(kind=kind_phys), dimension(:)     , intent(inout) :: weasd      ! water equivalent accumulated snow depth [mm]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: snwdph     ! snow depth [mm]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: tskin      ! ground surface skin temperature [K]
@@ -234,7 +243,17 @@
   real(kind=kind_phys), dimension(:)     , intent(inout) :: canopy     ! canopy moisture content [mm]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: trans      ! total plant transpiration [m/s]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: zorl       ! surface roughness [cm]
-  real(kind=kind_phys), dimension(:)     , intent(inout) :: snowxy     ! actual no. of snow layers
+
+
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: rb1        ! bulk richardson #
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: fm1        ! Monin_Obukhov_silarity_function for momentum
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: fh1        ! Monin_Obukhov_silarity_function for heat
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: ustar1     ! friction velocity m s-1
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: stress1    ! Wind stress m2 S-2
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: fm101      ! MOS function for momentum evaulated @ 10 m 
+  real(kind=kind_phys), dimension(:)      , intent(inout) :: fh21       ! MOS function for heat evaulated @ 2m
+
+  Real(kind=kind_phys), dimension(:)     , intent(inout) :: snowxy     ! actual no. of snow layers
   real(kind=kind_phys), dimension(:)     , intent(inout) :: tvxy       ! vegetation leaf temperature [K]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: tgxy       ! bulk ground surface temperature [K]
   real(kind=kind_phys), dimension(:)     , intent(inout) :: canicexy   ! canopy-intercepted ice [mm]
@@ -357,6 +376,9 @@
   real (kind=kind_phys), dimension(-nsnow+1:nsoil) :: temperature_snow_soil ! inout | snow/soil temperature [K]
   real (kind=kind_phys), dimension(       1:nsoil) :: soil_liquid_vol       ! inout | volumetric liquid soil moisture [m3/m3]
   real (kind=kind_phys), dimension(       1:nsoil) :: soil_moisture_vol     ! inout | volumetric soil moisture (ice + liq.) [m3/m3]
+
+  real (kind=kind_phys)                            :: surface_temperature   !  out  | surface aerodynamic temp
+
   real (kind=kind_phys)                            :: temperature_canopy_air! inout | canopy air tmeperature [K]
   real (kind=kind_phys)                            :: vapor_pres_canopy_air ! inout | canopy air vapor pressure [Pa]
   real (kind=kind_phys)                            :: canopy_wet_fraction   ! inout | wetted or snowed fraction of canopy (-)
@@ -395,6 +417,8 @@
   real (kind=kind_phys)                            :: deep_recharge         ! inout | (opt_run=5) recharge to or from the water table when deep [m]
   real (kind=kind_phys)                            :: recharge              ! inout | (opt_run=5) recharge to or from the water table when shallow [m] (diagnostic)
   real (kind=kind_phys)                            :: z0_total              !   out | weighted z0 sent to coupled model [m]
+  real (kind=kind_phys)                            :: z0h_total             !   out | weighted z0 sent to coupled model [m]
+
   real (kind=kind_phys)                            :: sw_absorbed_total     !   out | total absorbed solar radiation [W/m2]
   real (kind=kind_phys)                            :: sw_reflected_total    !   out | total reflected solar radiation [W/m2]
   real (kind=kind_phys)                            :: lw_absorbed_total     !   out | total net lw rad [W/m2]  [+ to atm]
@@ -466,6 +490,8 @@
   real (kind=kind_phys)                            :: lai_shaded            !   out | shaded leaf area index [m2/m2]
   real (kind=kind_phys)                            :: leaf_air_resistance   !   out | leaf boundary layer resistance [s/m]
 
+  real (kind=kind_phys)                            :: ustarx                ! inout |surface friction velocity
+
 !
 !  ---  local variable
 !
@@ -484,6 +510,11 @@
   real (kind=kind_phys) :: penman_radiation       ! used for penman calculation
   real (kind=kind_phys) :: dqsdt                  ! used for penman calculation
   real (kind=kind_phys) :: precip_freeze_frac_in  ! used for penman calculation
+
+  real (kind=kind_phys) :: virtfac1               ! virtual factor
+  real (kind=kind_phys) :: tvs1                   ! surface virtual temp
+  real (kind=kind_phys) :: vptemp                 ! virtual potential temp
+
  
   logical               :: is_snowing             ! used for penman calculation
   logical               :: is_freeze_rain         ! used for penman calculation
@@ -622,6 +653,8 @@
       soil_moisture_wtd            = smcwtdxy(i)
       deep_recharge                = deeprechxy(i)
       recharge                     = rechxy(i)
+
+      ustarx                       = ustar1(i)
       
       snow_ice_frac_old = 0.0
       do k = snow_levels+1, 0
@@ -633,8 +666,6 @@
 !  --- some outputs for atm model?
 !
       density = air_pressure_forcing / (con_rd * virtual_temperature)
-      chh(i) = ch(i)  * wind(i) * density
-      cmm(i) = cm(i)  * wind(i)
 !
 !  --- noah-mp additional variables
 !
@@ -670,7 +701,8 @@
           temperature_forcing  ,air_pressure_forcing ,uwind_forcing        ,vwind_forcing        , &
           spec_humidity_forcing,sw_radiation_forcing ,precipitation_forcing,radiation_lw_forcing , &
           temperature_soil_bot ,forcing_height       ,snow_ice_frac_old    ,zsoil                , &
-          snowfall             ,snow_water_equiv_old ,snow_albedo_old      ,                       &
+          snowfall             ,snow_water_equiv_old ,snow_albedo_old      ,ustarx               , &
+          z0h_total            ,                                                                   &
           cm_noahmp            ,ch_noahmp            ,snow_levels          ,snow_water_equiv     , &
           soil_moisture_vol    ,interface_depth      ,snow_depth           ,snow_level_ice       , &
           snow_level_liquid    ,temperature_ground   ,temperature_snow_soil,soil_liquid_vol      , &
@@ -724,6 +756,8 @@
         t2mmp(i)               = temperature_bare_2m
         q2mp(i)                = spec_humidity_bare_2m
 
+        tskin(i)               = temperature_ground
+
       else  ! not glacier
 
         ice_flag = 0 
@@ -758,7 +792,8 @@
           cm_noahmp             ,ch_noahmp             ,snow_age              , &
           grain_carbon          ,growing_deg_days      ,plant_growth_stage    , &
           soil_moisture_wtd     ,deep_recharge         ,recharge              , &
-          z0_total              ,sw_absorbed_total     ,sw_reflected_total    , &
+          z0_total              ,z0h_total             ,surface_temperature   , &
+          ustarx                ,sw_absorbed_total     ,sw_reflected_total    , &
           lw_absorbed_total     ,sensible_heat_total   ,ground_heat_total     , &
           latent_heat_canopy    ,latent_heat_ground    ,transpiration_heat    , &
           evaporation_canopy    ,transpiration         ,evaporation_soil      , &
@@ -799,6 +834,8 @@
          q2mp(i) = spec_humidity_veg_2m * vegetation_fraction + &
                   spec_humidity_bare_2m * (1-vegetation_fraction)
 
+         tskin(i) = surface_temperature
+
       endif          ! glacial split ends
 
 !
@@ -816,8 +853,6 @@
       snohf     (i)   = snowmelt_out * con_hfus         ! only snow that exits pack
       sbsno     (i)   = snow_sublimation
 
-      cmxy      (i)   = cm_noahmp
-      chxy      (i)   = ch_noahmp
       zorl      (i)   = z0_total * 100.0  ! convert to cm
 
       smc       (i,:) = soil_moisture_vol
@@ -848,8 +883,9 @@
 
       snowc     (i)   = snow_cover_fraction
       sncovr1   (i)   = snow_cover_fraction
-      qsurf     (i)   = q1(i)  + evap(i) / (con_hvap / con_cp * density * ch(i) * wind(i))     
-      tskin     (i)   = temperature_radiative
+
+      qsurf     (i)   = spec_humidity_surface
+
       tvxy      (i)   = temperature_leaf
       tgxy      (i)   = temperature_ground
       tahxy     (i)   = temperature_canopy_air
@@ -886,12 +922,44 @@
       smcwlt2(i) = smcdry_table(soil_category(1))   !!!change to wilt?
       smcref2(i) = smcref_table(soil_category(1))
 
+      virtfac1  = 1.0 +  con_fvirt * max(q1(i), 1.e-8)          !from forcing
+
+      if(thsfc_loc) then ! Use local potential temperature
+            vptemp    =temperature_forcing * prslki(i)*virtfac1       !virtual potential temperature @zlvl 1
+        else ! Use potential temperature reference to 1000 hPa
+            vptemp    =temperature_forcing /prslk1(i) * virtfac1
+       endif
+
+       if(thsfc_loc) then ! Use local potential temperature
+              tvs1   = tskin(i) * virtfac1
+         else ! Use potential temperature referenced to 1000 hPa
+              tvs1   = tskin(i)/prsik1(i) * virtfac1
+       endif
+
+      z0_total  = max(min(z0_total,forcing_height),1.0e-6)
+      z0h_total = max(z0h_total,1.0e-6)
+
+
+      call       stability                                                          &
+
+        (zf(i), snwdph(i), vptemp, wind(i), z0_total, z0h_total, tvs1, gravity,       & !use previous snwdph
+         virtual_temperature, thsfc_loc,                                              &
+         rb1(i),fm1(i),fh1(i),fm101(i),fh21(i),cm(i),ch(i),stress1(i),ustar1(i) )
+
+      cmxy(i) = cm(i)
+      chxy(i) = ch(i)
+
+      chh       (i)   = chxy(i)  * wind(i) * density
+      cmm       (i)   = cmxy(i)  * wind(i)
+
+      snwdph    (i)   = snow_depth * 1000.0       ! convert from m to mm; wait after the stability call
+
+!
 !      
 !  --- change units for output
 !
       hflx(i) = hflx(i) / density / con_cp
       evap(i) = evap(i) / density / con_hvap
-
 !
 !  --- calculate potential evaporation using noah code
 !
@@ -910,6 +978,11 @@
           if (temperature_forcing <= 275.15) is_freeze_rain = .true.  
         end if
       end if
+!
+! using new combined ch output to compute ep
+!
+      ch_noahmp = chxy(i) * wind(i)
+
       
       call penman (temperature_forcing, air_pressure_forcing , ch_noahmp            , &
                    virtual_temperature, potential_temperature, precipitation_forcing, &
